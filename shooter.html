@@ -44,6 +44,12 @@ const LEVEL_CONFIG = [
 
 const DIFF_MULT = { Easy: 0.7, Normal: 1.0, Hard: 1.4 };
 
+const POWERUP_TYPES = {
+  FIRE_RATE: { label: 'RAPID',  color: '#ff8800', glow: '#ff4400', duration: 8 },
+  SPEED:     { label: 'SPEED',  color: '#00ccff', glow: '#0066ff', duration: 8 },
+  TRIPLE:    { label: 'x3',     color: '#88ff00', glow: '#44cc00', duration: 8 },
+};
+
 // ─── Audio ──────────────────────────────────────────────────────────────────
 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 let masterGain = audioCtx.createGain();
@@ -72,6 +78,7 @@ function playTone(freq, type, duration, gainVal, freqEnd) {
 function sfxShoot()         { playTone(880, 'square', 0.08, 0.4, 1200); }
 function sfxEnemyDeath()    { playTone(120, 'sawtooth', 0.15, 0.5, 60); }
 function sfxPlayerHit()     { playTone(200, 'sawtooth', 0.2, 0.6, 80); }
+function sfxPowerup()       { playTone(440, 'sine', 0.08, 0.5, 880); setTimeout(() => playTone(880, 'sine', 0.15, 0.4, 1320), 80); }
 function sfxLevelComplete() {
   [330, 440, 550, 660].forEach((f, i) => {
     setTimeout(() => playTone(f, 'sine', 0.3, 0.4), i * 100);
@@ -91,6 +98,8 @@ let player = {};
 let bullets = [];
 let enemies = [];
 let particles = [];
+let powerups = [];
+let activePowerups = { FIRE_RATE: 0, SPEED: 0, TRIPLE: 0 };
 
 // Input
 const keys = {};
@@ -101,6 +110,8 @@ let mouseY = H / 2;
 let spawnTimer = 0;
 let enemiesToSpawn = 0;
 let totalKilled = 0;
+let powerupSpawnTimer = 0;
+let gameTime = 0;
 
 // ─── Button Helpers ──────────────────────────────────────────────────────────
 let buttons = [];
@@ -154,13 +165,13 @@ function initLevel(levelIndex) {
   bullets = [];
   enemies = [];
   particles = [];
-  const cfg = LEVEL_CONFIG[levelIndex];
-  const mult = DIFF_MULT[difficulty];
-  enemiesToSpawn = cfg.enemies;
+  powerups = [];
+  activePowerups = { FIRE_RATE: 0, SPEED: 0, TRIPLE: 0 };
+  enemiesToSpawn = LEVEL_CONFIG[levelIndex].enemies;
   totalKilled = 0;
   spawnTimer = 0;
-  // Reset spawn interval based on difficulty (harder = faster spawns)
-  // We'll reference cfg + mult inline during update
+  powerupSpawnTimer = 6; // first powerup after 6s
+  gameTime = 0;
 }
 
 function startGame() {
@@ -220,35 +231,56 @@ function spawnEnemy() {
 // ─── Update ──────────────────────────────────────────────────────────────────
 let lastTime = 0;
 
+function spawnPowerup() {
+  const types = Object.keys(POWERUP_TYPES);
+  const type = types[Math.floor(Math.random() * types.length)];
+  const margin = 80;
+  powerups.push({
+    x: margin + Math.random() * (W - margin * 2),
+    y: margin + Math.random() * (H - margin * 2),
+    type,
+    radius: 14,
+  });
+}
+
 function fireBullet() {
-  const angle = Math.atan2(mouseY - player.y, mouseX - player.x);
+  const baseAngle = Math.atan2(mouseY - player.y, mouseX - player.x);
   const speed = 520;
-  bullets.push({
-    x: player.x + Math.cos(angle) * (player.radius + 10),
-    y: player.y + Math.sin(angle) * (player.radius + 10),
-    vx: Math.cos(angle) * speed,
-    vy: Math.sin(angle) * speed,
-    radius: 4,
+  const angles = activePowerups.TRIPLE > 0
+    ? [baseAngle - 0.28, baseAngle, baseAngle + 0.28]
+    : [baseAngle];
+
+  angles.forEach(angle => {
+    bullets.push({
+      x: player.x + Math.cos(angle) * (player.radius + 10),
+      y: player.y + Math.sin(angle) * (player.radius + 10),
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      radius: 4,
+    });
   });
   sfxShoot();
-  player.shootCooldown = 0.12;
+  player.shootCooldown = activePowerups.FIRE_RATE > 0 ? 0.04 : 0.12;
 }
 
 function update(dt) {
   if (gameState !== STATE.PLAYING || optionsOpen) return;
 
+  gameTime += dt;
+
   // Player angle toward mouse
   player.angle = Math.atan2(mouseY - player.y, mouseX - player.x);
 
-  // Player movement
+  // Player movement (speed boost when SPEED powerup active)
+  const currentSpeed = player.speed * (activePowerups.SPEED > 0 ? 1.65 : 1);
   let dx = 0, dy = 0;
   if (keys['KeyW'] || keys['ArrowUp'])    dy -= 1;
   if (keys['KeyS'] || keys['ArrowDown'])  dy += 1;
   if (keys['KeyA'] || keys['ArrowLeft'])  dx -= 1;
   if (keys['KeyD'] || keys['ArrowRight']) dx += 1;
   if (dx !== 0 && dy !== 0) { dx *= 0.707; dy *= 0.707; }
-  player.x = Math.max(player.radius, Math.min(W - player.radius, player.x + dx * player.speed * dt));
-  player.y = Math.max(player.radius, Math.min(H - player.radius, player.y + dy * player.speed * dt));
+  player.x = Math.max(player.radius, Math.min(W - player.radius, player.x + dx * currentSpeed * dt));
+  player.y = Math.max(player.radius, Math.min(H - player.radius, player.y + dy * currentSpeed * dt));
 
   // Invincibility
   if (player.invincible) {
@@ -271,6 +303,30 @@ function update(dt) {
       spawnTimer -= spawnInterval;
       spawnEnemy();
       enemiesToSpawn--;
+    }
+  }
+
+  // Active powerup timers
+  for (const key of Object.keys(activePowerups)) {
+    if (activePowerups[key] > 0) activePowerups[key] = Math.max(0, activePowerups[key] - dt);
+  }
+
+  // Spawn powerups periodically (max 2 on field at once)
+  powerupSpawnTimer -= dt;
+  if (powerupSpawnTimer <= 0 && powerups.length < 2) {
+    spawnPowerup();
+    powerupSpawnTimer = 10 + Math.random() * 5;
+  }
+
+  // Player–powerup collision
+  for (let i = powerups.length - 1; i >= 0; i--) {
+    const p = powerups[i];
+    const dx2 = player.x - p.x, dy2 = player.y - p.y;
+    if (dx2*dx2 + dy2*dy2 < (player.radius + p.radius) * (player.radius + p.radius)) {
+      activePowerups[p.type] = POWERUP_TYPES[p.type].duration;
+      spawnParticles(p.x, p.y, POWERUP_TYPES[p.type].color, 12);
+      sfxPowerup();
+      powerups.splice(i, 1);
     }
   }
 
@@ -445,6 +501,27 @@ function drawGame() {
   });
   ctx.globalAlpha = 1;
 
+  // Powerups
+  const pulse = Math.sin(gameTime * 4) * 0.35 + 0.65; // 0.30–1.0
+  powerups.forEach(p => {
+    const cfg = POWERUP_TYPES[p.type];
+    ctx.shadowColor = cfg.glow;
+    ctx.shadowBlur = 18 * pulse;
+    ctx.strokeStyle = cfg.color;
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fill();
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = cfg.color;
+    ctx.font = `bold ${p.type === 'TRIPLE' ? 13 : 11}px Courier New`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(cfg.label, p.x, p.y);
+  });
+
   // Bullets
   bullets.forEach(b => {
     ctx.fillStyle = '#ffee00';
@@ -527,6 +604,28 @@ function drawHUD() {
   ctx.font = 'bold 16px Courier New';
   ctx.textAlign = 'right';
   ctx.fillText(`Score: ${score}`, W - 14, 14);
+
+  // Active powerup timers (bottom-left)
+  let pyOffset = H - 34 - 10;
+  const activeEntries = Object.entries(activePowerups).filter(([,t]) => t > 0);
+  activeEntries.forEach(([key, remaining]) => {
+    const cfg = POWERUP_TYPES[key];
+    const barW = 130, barH = 14;
+    const bx = 12, by = pyOffset - barH;
+    pyOffset -= barH + 6;
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(bx - 2, by - 2, barW + 4, barH + 4);
+    ctx.fillStyle = '#222';
+    ctx.fillRect(bx, by, barW, barH);
+    const ratio = remaining / cfg.duration;
+    ctx.fillStyle = cfg.color;
+    ctx.fillRect(bx, by, barW * ratio, barH);
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 10px Courier New';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(cfg.label, bx + 4, by + barH / 2);
+  });
 
   // HP bar — bottom center
   const barW = 220, barH = 18;
